@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
@@ -34,6 +35,7 @@ class BubbleService : Service() {
 
   private var windowManager: WindowManager? = null
   private var bubble: TextView? = null
+  private var target: TextView? = null
   private var engine: SpeechEngine? = null
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -62,6 +64,10 @@ class BubbleService : Service() {
       try { windowManager?.removeView(it) } catch (e: Exception) {}
     }
     bubble = null
+    target?.let {
+      try { windowManager?.removeView(it) } catch (e: Exception) {}
+    }
+    target = null
     super.onDestroy()
   }
 
@@ -105,6 +111,55 @@ class BubbleService : Service() {
     bubble?.background = circle(if (active) COLOR_LISTENING else COLOR_IDLE)
   }
 
+  private fun overlayType(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+
+  private fun targetSize() = dp(64)
+  private fun targetBottom() = dp(56)
+  private fun screenW() = resources.displayMetrics.widthPixels
+  private fun screenH() = resources.displayMetrics.heightPixels
+  private fun targetCenterX() = screenW() / 2
+  private fun targetCenterY() = screenH() - targetBottom() - targetSize() / 2
+
+  // دائرة الحذف (✕) أسفل الشاشة: تظهر فقط أثناء سحب الدائرة العائمة، مثل ماسنجر.
+  // تُضاف قبل الدائرة العائمة حتى تبقى الدائرة العائمة فوقها.
+  private fun addTarget(wm: WindowManager) {
+    val t = TextView(this).apply {
+      text = "✕"
+      textSize = 26f
+      gravity = Gravity.CENTER
+      setTextColor(Color.WHITE)
+      background = circle("#CC1F2937")
+      visibility = View.GONE
+    }
+    val lp = WindowManager.LayoutParams(
+      targetSize(), targetSize(), overlayType(),
+      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+      PixelFormat.TRANSLUCENT
+    ).apply {
+      gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+      y = targetBottom()
+    }
+    try {
+      wm.addView(t, lp)
+      target = t
+    } catch (e: Exception) {}
+  }
+
+  private fun showTarget(show: Boolean) {
+    target?.visibility = if (show) View.VISIBLE else View.GONE
+    if (!show) highlightTarget(false)
+  }
+
+  private fun highlightTarget(on: Boolean) {
+    target?.let {
+      it.background = circle(if (on) "#DC2626" else "#CC1F2937")
+      val k = if (on) 1.3f else 1f
+      it.scaleX = k
+      it.scaleY = k
+    }
+  }
+
   private fun addBubble() {
     val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     windowManager = wm
@@ -117,9 +172,9 @@ class BubbleService : Service() {
       background = circle(COLOR_IDLE)
       elevation = dp(6).toFloat()
     }
-    val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+    addTarget(wm)
     val lp = WindowManager.LayoutParams(
-      size, size, type,
+      size, size, overlayType(),
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
       PixelFormat.TRANSLUCENT
     ).apply {
@@ -133,10 +188,11 @@ class BubbleService : Service() {
     var touchX = 0f
     var touchY = 0f
     var moved = false
+    var near = false
     view.setOnTouchListener { v, e ->
       when (e.action) {
         MotionEvent.ACTION_DOWN -> {
-          startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY; moved = false
+          startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY; moved = false; near = false
           true
         }
         MotionEvent.ACTION_MOVE -> {
@@ -144,14 +200,44 @@ class BubbleService : Service() {
           val dy = e.rawY - touchY
           if (abs(dx) > dp(8) || abs(dy) > dp(8)) moved = true
           if (moved) {
+            showTarget(true)
             lp.x = startX + dx.toInt()
             lp.y = startY + dy.toInt()
+            val cx = lp.x + size / 2
+            val cy = lp.y + size / 2
+            val ddx = (cx - targetCenterX()).toDouble()
+            val ddy = (cy - targetCenterY()).toDouble()
+            val isNear = Math.sqrt(ddx * ddx + ddy * ddy) < dp(80)
+            if (isNear != near) {
+              near = isNear
+              highlightTarget(near)
+            }
+            if (near) {
+              // الدائرة تنجذب إلى ✕ لتوضيح أن الإفلات سيحذفها
+              lp.x = targetCenterX() - size / 2
+              lp.y = targetCenterY() - size / 2
+            }
             wm.updateViewLayout(v, lp)
           }
           true
         }
         MotionEvent.ACTION_UP -> {
-          if (!moved) onBubbleTap()
+          val shouldClose = moved && near
+          showTarget(false)
+          if (shouldClose) {
+            stopSelf()
+          } else if (moved) {
+            // تلتصق بأقرب حافة جانبية بعد الإفلات
+            val goRight = lp.x + size / 2 > screenW() / 2
+            lp.x = if (goRight) screenW() - size - dp(8) else dp(8)
+            try { wm.updateViewLayout(v, lp) } catch (ex: Exception) {}
+          } else {
+            onBubbleTap()
+          }
+          true
+        }
+        MotionEvent.ACTION_CANCEL -> {
+          showTarget(false)
           true
         }
         else -> false
