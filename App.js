@@ -46,6 +46,15 @@ const OWN_PKG = 'com.abdo.iftahli';
 const LIGHT = { bg: '#F4F7F6', card: '#FFFFFF', text: '#12201C', sub: '#5E6F69', accent: '#0F766E', onAccent: '#FFFFFF', border: '#D6E0DD', warn: '#B45309', danger: '#B91C1C' };
 const DARK = { bg: '#0E1513', card: '#17211E', text: '#EAF2EF', sub: '#8FA39D', accent: '#2DD4BF', onAccent: '#06201C', border: '#26352F', warn: '#FBBF24', danger: '#F87171' };
 
+// تنقية الأوامر المحفوظة: نقبل فقط مصفوفة سجلاتها فيها phrase و pkg نصيّان، ونتجاهل أي سجل ناقص أو تالف.
+// لا نغيّر شكل السجلات الصحيحة، فتبقى متوافقة مع البيانات المحفوظة.
+function sanitizeCommands(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((x) => x && typeof x === 'object' && typeof x.phrase === 'string' && typeof x.pkg === 'string')
+    .map((x) => (typeof x.name === 'string' ? x : { ...x, name: x.pkg }));
+}
+
 // هل التطبيق يطابق ما كتبه المستخدم في خانة البحث؟
 function matchesSearch(app, search) {
   const q = tokens(search);
@@ -92,7 +101,7 @@ export default function App() {
   useEffect(() => {
     loadApps();
     AsyncStorage.getItem(STORE_KEY)
-      .then((raw) => raw && setCustom(JSON.parse(raw)))
+      .then((raw) => raw && setCustom(sanitizeCommands(JSON.parse(raw))))
       .catch(() => {});
   }, [loadApps]);
 
@@ -392,6 +401,7 @@ export default function App() {
             <ActivityIndicator style={{ marginTop: 30 }} color={c.accent} />
           ) : (
             <FlatList
+              key="apps-grid"
               data={shownApps}
               keyExtractor={(a) => a.pkg}
               numColumns={3}
@@ -414,6 +424,7 @@ export default function App() {
           )
         ) : (
           <FlatList
+            key="cmds-list"
             data={custom}
             keyExtractor={(x, i) => `${x.phrase}-${i}`}
             contentContainerStyle={s.grid}
