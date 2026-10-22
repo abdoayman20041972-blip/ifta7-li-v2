@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "افتح لي",
-    "slug": "ifta7-li",
+    "slug": "ifta7-li-v2",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -14,6 +14,12 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       }
     },
-    "plugins": []
+    "plugins": [],
+    "owner": "abdonawar",
+    "extra": {
+      "eas": {
+        "projectId": "adb33083-9f42-40b6-9dd3-73aae9f0a615"
+      }
+    }
   }
 }
