@@ -12,6 +12,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -53,6 +54,17 @@ function sanitizeCommands(value) {
   return value
     .filter((x) => x && typeof x === 'object' && typeof x.phrase === 'string' && typeof x.pkg === 'string')
     .map((x) => (typeof x.name === 'string' ? x : { ...x, name: x.pkg }));
+}
+
+const AVATARS = ['#0F766E', '#2563EB', '#7C3AED', '#DB2777', '#EA580C', '#CA8A04', '#16A34A', '#0891B2'];
+function avatarColor(name) {
+  let h = 0;
+  for (const ch of String(name || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATARS[h % AVATARS.length];
+}
+function initial(name) {
+  const t = String(name || '').trim();
+  return t ? Array.from(t)[0].toUpperCase() : '?';
 }
 
 // هل التطبيق يطابق ما كتبه المستخدم في خانة البحث؟
@@ -294,8 +306,10 @@ export default function App() {
       } catch (e) {}
     };
     sync();
+    const timer = setInterval(sync, 2000);
     const appSub = AppState.addEventListener('change', (st) => st === 'active' && sync());
     return () => {
+      clearInterval(timer);
       subs.forEach((x) => x && x.remove && x.remove());
       appSub && appSub.remove && appSub.remove();
     };
@@ -345,8 +359,20 @@ export default function App() {
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
       <KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={s.header}>
-          <Text style={s.title}>افتح لي</Text>
-          <Text style={s.subtitle}>قل اسم التطبيق وأنا أفتحه</Text>
+          <View style={s.headerTexts}>
+            <Text style={s.title}>افتح لي</Text>
+            <Text style={s.subtitle}>قل اسم التطبيق وأنا أفتحه</Text>
+          </View>
+          <View style={s.logo}>
+            <Text style={s.logoText}>↗</Text>
+          </View>
+        </View>
+
+        <View style={s.hero}>
+          <Pressable style={[s.heroMic, listening && s.heroMicOn]} onPress={toggleListen} accessibilityRole="button" accessibilityLabel="تحدث بالصوت">
+            <Text style={s.heroMicText}>{listening ? '■' : '🎤'}</Text>
+          </Pressable>
+          <Text style={s.heroLabel}>{listening ? 'بسمعك... قل اسم التطبيق' : 'اضغط وتكلّم، مثال: "افتح واتساب"'}</Text>
         </View>
 
         <View style={s.inputRow}>
@@ -358,22 +384,23 @@ export default function App() {
             value={text}
             onChangeText={setText}
             onSubmitEditing={() => run(text)}
-            placeholder="مثال: افتحلي يوتيوب"
+            placeholder="أو اكتب: افتحلي يوتيوب"
             placeholderTextColor={c.sub}
             returnKeyType="go"
             textAlign="right"
             autoCorrect={false}
           />
-          <Pressable style={[s.micBtn, listening && s.micOn]} onPress={toggleListen} accessibilityRole="button" accessibilityLabel="تحدث بالصوت">
-            <Text style={s.micText}>{listening ? '...' : '🎤'}</Text>
-          </Pressable>
         </View>
-        <Text style={s.hint}>اضغط الميكروفون وقل الأمر، مثال: "افتح واتساب".</Text>
-        <Pressable style={s.bubbleBtn} onPress={toggleBubble} accessibilityRole="button">
-          <Text style={s.bubbleText}>{bubbleOn ? 'إيقاف الدائرة العائمة' : 'تشغيل الدائرة العائمة'}</Text>
-        </Pressable>
 
-        <View style={[s.message, { borderColor: msgColor }]}>
+        <View style={s.bubbleCard}>
+          <Switch value={bubbleOn} onValueChange={toggleBubble} trackColor={{ false: c.border, true: c.accent }} thumbColor="#FFFFFF" />
+          <View style={s.bubbleInfo}>
+            <Text style={s.bubbleTitle}>الدائرة العائمة</Text>
+            <Text style={s.bubbleSub}>{bubbleOn ? 'شغالة. اسحبها إلى ✕ أسفل الشاشة لإغلاقها' : 'تظهر فوق أي تطبيق لتتكلم من أي مكان'}</Text>
+          </View>
+        </View>
+
+        <View style={[s.message, { borderColor: msgColor, borderRightColor: msgColor }]}>
           <Text style={[s.messageText, message.kind === 'warn' && { color: c.warn }]}>{message.body}</Text>
           {pending ? (
             <Pressable style={s.teachBtn} onPress={() => { openApp(pending); setText(''); }} accessibilityRole="button">
@@ -415,6 +442,9 @@ export default function App() {
               }
               renderItem={({ item }) => (
                 <Pressable style={s.tile} onPress={() => openApp(item)} accessibilityRole="button" accessibilityLabel={`افتح ${item.name}`}>
+                  <View style={[s.avatar, { backgroundColor: avatarColor(item.name) }]}>
+                    <Text style={s.avatarText}>{initial(item.name)}</Text>
+                  </View>
                   <Text style={s.tileText} numberOfLines={2}>
                     {item.name}
                   </Text>
@@ -508,7 +538,7 @@ function makeStyles(c) {
     goBtn: { backgroundColor: c.accent, borderRadius: 14, paddingHorizontal: 20, justifyContent: 'center' },
     goText: { color: c.onAccent, fontSize: 17, fontWeight: '700', textAlign: 'center' },
     hint: { marginHorizontal: 20, marginTop: 6, color: c.sub, fontSize: 13, textAlign: 'right', writingDirection: 'rtl' },
-    message: { marginHorizontal: 16, marginTop: 10, padding: 12, backgroundColor: c.card, borderRadius: 14, borderWidth: 1 },
+    message: { marginHorizontal: 16, marginTop: 10, padding: 12, backgroundColor: c.card, borderRadius: 14, borderWidth: 1, borderRightWidth: 4 },
     messageText: { color: c.text, fontSize: 15, textAlign: 'right', writingDirection: 'rtl', lineHeight: 22 },
     teachBtn: { alignSelf: 'flex-end', marginTop: 8, backgroundColor: c.accent, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
     teachText: { color: c.onAccent, fontWeight: '700', fontSize: 14 },
@@ -521,7 +551,7 @@ function makeStyles(c) {
     tile: {
       flex: 1 / 3,
       margin: 4,
-      minHeight: 64,
+      minHeight: 96,
       backgroundColor: c.card,
       borderRadius: 14,
       borderWidth: 1,
@@ -550,5 +580,19 @@ function makeStyles(c) {
     bubbleBtn: { marginHorizontal: 16, marginTop: 8, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: c.accent, alignItems: 'center' },
     bubbleText: { color: c.accent, fontWeight: '700', fontSize: 14 },
     del: { color: c.danger, fontWeight: '700', fontSize: 14, padding: 4 },
+    headerTexts: { alignItems: 'flex-end' },
+    logo: { width: 48, height: 48, borderRadius: 14, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginLeft: 12 },
+    logoText: { color: c.onAccent, fontSize: 26, fontWeight: '800' },
+    hero: { alignItems: 'center', marginTop: 10 },
+    heroMic: { width: 84, height: 84, borderRadius: 42, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+    heroMicOn: { backgroundColor: c.danger },
+    heroMicText: { fontSize: 34, color: '#FFFFFF' },
+    heroLabel: { marginTop: 8, color: c.sub, fontSize: 14, writingDirection: 'rtl', textAlign: 'center' },
+    bubbleCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 16, marginTop: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: c.card, borderRadius: 14, borderWidth: 1, borderColor: c.border },
+    bubbleInfo: { flex: 1, alignItems: 'flex-end', marginLeft: 10 },
+    bubbleTitle: { color: c.text, fontSize: 15, fontWeight: '700', writingDirection: 'rtl' },
+    bubbleSub: { color: c.sub, fontSize: 12.5, marginTop: 2, textAlign: 'right', writingDirection: 'rtl' },
+    avatar: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+    avatarText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
   });
 }
