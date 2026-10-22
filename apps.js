@@ -1,0 +1,26 @@
+// قائمة التطبيقات التي يعرفها التطبيق.
+// name: الاسم الذي يظهر | pkg: اسم الحزمة داخل أندرويد | aliases: طرق مختلفة لقول الاسم
+module.exports = [
+  { name: 'واتساب', pkg: 'com.whatsapp', aliases: ['واتساب', 'واتس', 'واتساب', 'وتساب', 'وتس اب', 'whatsapp', 'whats app', 'watsapp'] },
+  { name: 'يوتيوب', pkg: 'com.google.android.youtube', aliases: ['يوتيوب', 'يوتوب', 'يوتيب', 'youtube'] },
+  { name: 'فيسبوك', pkg: 'com.facebook.katana', aliases: ['فيسبوك', 'فيس بوك', 'فيس', 'فيسبووك', 'facebook'] },
+  { name: 'ماسنجر', pkg: 'com.facebook.orca', aliases: ['ماسنجر', 'مسنجر', 'ماسينجر', 'messenger'] },
+  { name: 'إنستجرام', pkg: 'com.instagram.android', aliases: ['انستجرام', 'انستغرام', 'انستا', 'انستجرم', 'instagram', 'insta'] },
+  { name: 'تيك توك', pkg: 'com.zhiliaoapp.musically', aliases: ['تيك توك', 'تيكتوك', 'تك توك', 'tiktok', 'tik tok'] },
+  { name: 'تليجرام', pkg: 'org.telegram.messenger', aliases: ['تليجرام', 'تلجرام', 'تيليجرام', 'تلغرام', 'telegram'] },
+  { name: 'سناب شات', pkg: 'com.snapchat.android', aliases: ['سناب شات', 'سناب', 'سنابشات', 'snapchat', 'snap'] },
+  { name: 'إكس (تويتر)', pkg: 'com.twitter.android', aliases: ['تويتر', 'اكس', 'twitter', 'x'] },
+  { name: 'جيميل', pkg: 'com.google.android.gm', aliases: ['جيميل', 'جي ميل', 'ايميل', 'البريد', 'gmail', 'email', 'mail'] },
+  { name: 'كروم', pkg: 'com.android.chrome', aliases: ['كروم', 'جوجل كروم', 'المتصفح', 'متصفح', 'chrome', 'google chrome', 'browser'] },
+  { name: 'جوجل', pkg: 'com.google.android.googlequicksearchbox', aliases: ['جوجل', 'قوقل', 'google'] },
+  { name: 'خرائط جوجل', pkg: 'com.google.android.apps.maps', aliases: ['خرائط', 'خرائط جوجل', 'خريطه', 'ماب', 'مابس', 'maps', 'google maps'] },
+  { name: 'متجر Play', pkg: 'com.android.vending', aliases: ['بلاي ستور', 'جوجل بلاي', 'متجر بلاي', 'المتجر', 'play store', 'google play', 'playstore'] },
+  { name: 'الإعدادات', pkg: 'com.android.settings', aliases: ['اعدادات', 'الاعدادات', 'ضبط', 'settings'] },
+  { name: 'الصور', pkg: 'com.google.android.apps.photos', aliases: ['صور', 'الصور', 'جاليري', 'معرض الصور', 'photos', 'gallery'] },
+  { name: 'سبوتيفاي', pkg: 'com.spotify.music', aliases: ['سبوتيفاي', 'سبوتيفاي', 'spotify'] },
+  { name: 'نتفلكس', pkg: 'com.netflix.mediaclient', aliases: ['نتفلكس', 'نتفليكس', 'netflix'] },
+  { name: 'زووم', pkg: 'us.zoom.videomeetings', aliases: ['زووم', 'زوم', 'zoom'] },
+  { name: 'تيمز', pkg: 'com.microsoft.teams', aliases: ['تيمز', 'تيمس', 'teams'] },
+  { name: 'ديسكورد', pkg: 'com.discord', aliases: ['ديسكورد', 'ديسكورت', 'discord'] },
+  { name: 'لينكدإن', pkg: 'com.linkedin.android', aliases: ['لينكدان', 'لينكد ان', 'linkedin'] },
+];
