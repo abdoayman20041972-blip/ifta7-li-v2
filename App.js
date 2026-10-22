@@ -1,11 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Linking,
+  PermissionsAndroid,
   Platform,
   Pressable,
   ScrollView,
@@ -18,12 +20,28 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { getLaunchableApps, launchApp } from './modules/installed-apps';
+import {
+  canDrawOverlays,
+  getLaunchableApps,
+  isBubbleRunning,
+  isSpeechAvailable,
+  launchApp,
+  onSpeechError,
+  onSpeechResult,
+  onSpeechState,
+  openOverlaySettings,
+  showToast,
+  startBubble,
+  startListening,
+  stopBubble,
+  stopListening,
+} from './modules/installed-apps';
 import KNOWN from './apps';
 import { buildApps } from './appList';
-import { normalize, tokens, understand } from './matcher';
+import { normalize, tokens, understandBest } from './matcher';
 
 const STORE_KEY = 'ifta7li.customCommands.v1';
+const OWN_PKG = 'com.abdo.iftahli';
 
 const LIGHT = { bg: '#F4F7F6', card: '#FFFFFF', text: '#12201C', sub: '#5E6F69', accent: '#0F766E', onAccent: '#FFFFFF', border: '#D6E0DD', warn: '#B45309', danger: '#B91C1C' };
 const DARK = { bg: '#0E1513', card: '#17211E', text: '#EAF2EF', sub: '#8FA39D', accent: '#2DD4BF', onAccent: '#06201C', border: '#26352F', warn: '#FBBF24', danger: '#F87171' };
@@ -45,6 +63,10 @@ export default function App() {
   const [text, setText] = useState('');
   const [message, setMessage] = useState({ kind: 'info', body: 'اكتب أو قل بالميكروفون: "افتح واتساب"' });
   const [teachPhrase, setTeachPhrase] = useState(null); // يظهر زر "علّمني" بعد أمر غير مفهوم
+  const [listening, setListening] = useState(false);
+  const [bubbleOn, setBubbleOn] = useState(false);
+  const handlerRef = useRef({});
+  const [pending, setPending] = useState(null); // تطبيق فهمناه بثقة منخفضة وننتظر تأكيد المستخدم
 
   const [apps, setApps] = useState([]);
   const [loadingApps, setLoadingApps] = useState(true);
@@ -84,17 +106,20 @@ export default function App() {
   }
 
   function openApp(app) {
-    let ok = false;
+    let status = 'failed';
     try {
-      ok = launchApp(app.pkg);
+      status = launchApp(app.pkg);
     } catch (e) {
-      ok = false;
+      status = 'failed';
     }
-    if (ok) {
+    setPending(null);
+    if (status === 'ok') {
       setMessage({ kind: 'ok', body: `تم فتح ${app.name}` });
       setTeachPhrase(null);
-    } else {
+    } else if (status === 'not_installed') {
       offerStore(app);
+    } else {
+      setMessage({ kind: 'warn', body: `ما قدرتش أفتح ${app.name}. جرّب تفتحه يدويًا أو حدّث قائمة التطبيقات.` });
     }
   }
 
@@ -106,10 +131,12 @@ export default function App() {
     ]);
   }
 
-  function run(command) {
+  function run(command, alts) {
     Keyboard.dismiss();
-    const result = understand(command, apps, custom);
-    if (result && !result.ambiguous) {
+    setPending(null);
+    const list = alts && alts.length ? alts : [command];
+    const result = understandBest(list, apps, custom);
+    if (result && result.confident) {
       openApp(result.app);
       setText('');
       return;
@@ -120,15 +147,150 @@ export default function App() {
       setTeachPhrase(command);
       return;
     }
+    if (result) {
+      // فهمناه لكن بثقة منخفضة (تقريب إملائي أو كلمة زائدة): نعرض ونطلب تأكيدًا
+      setPending(result.app);
+      setMessage({ kind: 'warn', body: `فهمت إنك تقصد ${result.app.name}. أفتحه؟` });
+      setTeachPhrase(command);
+      return;
+    }
     // لم نجده بين المثبتة: ربما هو من المعروفين لكنه غير مثبت
-    const known = understand(command, KNOWN);
-    if (known && !known.ambiguous) {
+    const known = understandBest(list, KNOWN, []);
+    if (known && known.confident) {
       offerStore(known.app);
       return;
     }
     setMessage({ kind: 'warn', body: 'ما فهمتش أنهي تطبيق تقصد. تقدر تعلّمني الأمر ده مرة واحدة وأفتحه بعد كده.' });
     setTeachPhrase(command);
   }
+
+  // ===== الصوت =====
+  async function ensureMic() {
+    const g = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO, {
+      title: 'إذن الميكروفون',
+      message: 'علشان أسمع الأمر الصوتي وأفتح التطبيق',
+      buttonPositive: 'موافق',
+      buttonNegative: 'لا',
+    });
+    if (g === PermissionsAndroid.RESULTS.GRANTED) return true;
+    setMessage({ kind: 'warn', body: 'محتاج إذن الميكروفون علشان أسمعك. فعّله من إعدادات التطبيق.' });
+    return false;
+  }
+
+  async function toggleListen() {
+    if (listening) {
+      stopListening();
+      setListening(false);
+      return;
+    }
+    if (!(await ensureMic())) return;
+    if (!isSpeechAvailable()) {
+      setMessage({ kind: 'warn', body: 'خدمة التعرف على الكلام مش متاحة. تأكد إن تطبيق Google مثبّت ومحدّث.' });
+      return;
+    }
+    setTeachPhrase(null);
+    setPending(null);
+    setListening(true);
+    setMessage({ kind: 'info', body: 'بسمعك... قل اسم التطبيق' });
+    startListening();
+  }
+
+  async function toggleBubble() {
+    if (bubbleOn) {
+      stopBubble();
+      setBubbleOn(false);
+      return;
+    }
+    if (!(await ensureMic())) return;
+    if (Platform.OS === 'android' && Platform.Version >= 33) {
+      try {
+        await PermissionsAndroid.request('android.permission.POST_NOTIFICATIONS');
+      } catch (e) {}
+    }
+    if (!canDrawOverlays()) {
+      Alert.alert(
+        'إذن الظهور فوق التطبيقات',
+        'لازم تسمح لـ "افتح لي" بالظهور فوق التطبيقات الأخرى. هتفتح لك شاشة الإعدادات: فعّل الإذن ثم ارجع واضغط "تشغيل الدائرة العائمة" تاني.',
+        [
+          { text: 'لا', style: 'cancel' },
+          { text: 'فتح الإعدادات', onPress: () => openOverlaySettings() },
+        ]
+      );
+      return;
+    }
+    const st = startBubble();
+    if (st === 'ok') {
+      setBubbleOn(true);
+      setMessage({ kind: 'ok', body: 'الدائرة شغالة. اضغطها من أي تطبيق وقل الأمر.' });
+    } else {
+      setMessage({ kind: 'warn', body: 'ما قدرتش أشغّل الدائرة. تأكد من الأذونات وجرّب تاني.' });
+    }
+  }
+
+  // أمر جاء من الدائرة العائمة (التطبيق غالبًا في الخلفية)
+  function runFromBubble(alts) {
+    const r = understandBest(alts, apps, custom);
+    if (r && r.confident) {
+      let status = 'failed';
+      try {
+        status = launchApp(r.app.pkg);
+      } catch (e) {}
+      if (status === 'ok') showToast(`تم فتح ${r.app.name}`);
+      else if (status === 'not_installed') showToast(`${r.app.name} غير مثبت`);
+      else showToast(`ما قدرتش أفتح ${r.app.name}`);
+      return;
+    }
+    // غير مؤكد: نُظهر "افتح لي" ليعرض الفهم ويطلب التأكيد
+    try {
+      launchApp(OWN_PKG);
+    } catch (e) {}
+    setText(alts[0]);
+    run(alts[0], alts);
+  }
+
+  function onState(e) {
+    if (e.source === 'app') setListening(e.state !== 'idle');
+  }
+
+  function onResult(e) {
+    const alts = (e.alternatives ? e.alternatives.split('|') : [e.text]).filter(Boolean);
+    if (!alts.length) return;
+    if (e.source === 'bubble') {
+      runFromBubble(alts);
+    } else {
+      setText(alts[0]);
+      run(alts[0], alts);
+    }
+  }
+
+  function onError(e) {
+    if (e.source === 'app') {
+      setListening(false);
+      setMessage({ kind: 'warn', body: e.message });
+    }
+  }
+
+  // نحدّث المعالجات في كل رسم حتى ترى أحدث التطبيقات والأوامر
+  handlerRef.current = { onState, onResult, onError };
+
+  useEffect(() => {
+    const subs = [
+      onSpeechState((e) => handlerRef.current.onState(e)),
+      onSpeechResult((e) => handlerRef.current.onResult(e)),
+      onSpeechError((e) => handlerRef.current.onError(e)),
+    ];
+    const sync = () => {
+      try {
+        setBubbleOn(isBubbleRunning());
+      } catch (e) {}
+    };
+    sync();
+    const appSub = AppState.addEventListener('change', (st) => st === 'active' && sync());
+    return () => {
+      subs.forEach((x) => x && x.remove && x.remove());
+      appSub && appSub.remove && appSub.remove();
+    };
+  }, []);
 
   function startTeaching() {
     setNewPhrase(teachPhrase ? tokens(teachPhrase).join(' ') : '');
@@ -193,11 +355,22 @@ export default function App() {
             textAlign="right"
             autoCorrect={false}
           />
+          <Pressable style={[s.micBtn, listening && s.micOn]} onPress={toggleListen} accessibilityRole="button" accessibilityLabel="تحدث بالصوت">
+            <Text style={s.micText}>{listening ? '...' : '🎤'}</Text>
+          </Pressable>
         </View>
-        <Text style={s.hint}>للأمر بالصوت: اضغط أيقونة الميكروفون في لوحة المفاتيح وتكلم.</Text>
+        <Text style={s.hint}>اضغط الميكروفون وقل الأمر، مثال: "افتح واتساب".</Text>
+        <Pressable style={s.bubbleBtn} onPress={toggleBubble} accessibilityRole="button">
+          <Text style={s.bubbleText}>{bubbleOn ? 'إيقاف الدائرة العائمة' : 'تشغيل الدائرة العائمة'}</Text>
+        </Pressable>
 
         <View style={[s.message, { borderColor: msgColor }]}>
           <Text style={[s.messageText, message.kind === 'warn' && { color: c.warn }]}>{message.body}</Text>
+          {pending ? (
+            <Pressable style={s.teachBtn} onPress={() => { openApp(pending); setText(''); }} accessibilityRole="button">
+              <Text style={s.teachText}>{`نعم، افتح ${pending.name}`}</Text>
+            </Pressable>
+          ) : null}
           {teachPhrase ? (
             <Pressable style={s.teachBtn} onPress={startTeaching} accessibilityRole="button">
               <Text style={s.teachText}>علّمني الأمر ده</Text>
@@ -360,6 +533,11 @@ function makeStyles(c) {
     saveBtn: { marginTop: 12, backgroundColor: c.accent, borderRadius: 14, paddingVertical: 13 },
     cmdRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: c.card, borderRadius: 12, borderWidth: 1, borderColor: c.border, padding: 12, marginBottom: 8 },
     cmdText: { flex: 1, color: c.text, fontSize: 15, textAlign: 'right', writingDirection: 'rtl', marginLeft: 10 },
+    micBtn: { backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: 14, paddingHorizontal: 16, justifyContent: 'center' },
+    micOn: { backgroundColor: c.danger, borderColor: c.danger },
+    micText: { fontSize: 20, color: c.text },
+    bubbleBtn: { marginHorizontal: 16, marginTop: 8, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: c.accent, alignItems: 'center' },
+    bubbleText: { color: c.accent, fontWeight: '700', fontSize: 14 },
     del: { color: c.danger, fontWeight: '700', fontSize: 14, padding: 4 },
   });
 }
