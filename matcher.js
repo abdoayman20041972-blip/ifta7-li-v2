@@ -63,36 +63,43 @@ function similarity(a, b) {
 }
 
 // درجة تطابق تطبيق واحد مع الأمر (0 إلى 1)
+// يرجع { score, kind, covered }:
+//   kind: exact (تطابق تام) | contains (كل كلمات الاسم في الجملة) | subset (الجملة جزء من اسم أطول) | fuzzy (تقريب إملائي)
+//   covered: هل كل كلمات الأمر مفسَّرة بالاسم؟ لو فيه كلمة زائدة (مثل "ميوزيك") لا نعتبر الفهم مؤكدًا.
 function scoreApp(app, queryTokens) {
   const query = queryTokens.join(' ');
-  let best = 0;
+  let best = { score: 0, kind: null, covered: false };
+  const consider = (score, kind, covered) => {
+    if (score > best.score) best = { score, kind, covered };
+  };
   for (const alias of app.aliases) {
     const aliasTokens = tokens(alias);
     if (!aliasTokens.length) continue;
     const aliasText = aliasTokens.join(' ');
 
-    let score = 0;
     if (aliasText === query) {
-      score = 1;
-    } else if (aliasTokens.every((t) => queryTokens.includes(t))) {
-      // كل كلمات الاسم موجودة؛ نفضّل الاسم الذي يغطي أكبر جزء من الجملة
-      score = 0.9 + 0.1 * (aliasText.length / Math.max(query.length, aliasText.length));
-    } else {
-      // كلمات الأمر كلها جزء من اسم أطول (مثال: "maps" داخل "Google Maps")
-      if (query.length >= 3 && queryTokens.every((t) => aliasTokens.includes(t))) {
-        score = 0.75 + 0.1 * (query.length / aliasText.length);
-      }
-      // تقريب للأخطاء الإملائية، كلمة بكلمة
-      let fuzzy = 0;
-      if (aliasTokens.length === 1) {
-        for (const t of queryTokens) fuzzy = Math.max(fuzzy, similarity(t, aliasTokens[0]));
-      } else {
-        fuzzy = similarity(query, aliasText);
-      }
-      // نرفض التشابه الضعيف، ونقلل قيمة التقريب عن التطابق الحقيقي
-      score = Math.max(score, fuzzy >= 0.72 ? fuzzy * 0.88 : 0);
+      consider(1, 'exact', true);
+      continue;
     }
-    best = Math.max(best, score);
+    if (aliasTokens.every((t) => queryTokens.includes(t))) {
+      // كل كلمات الاسم موجودة؛ نفضّل الاسم الذي يغطي أكبر جزء من الجملة
+      const covered = queryTokens.every((t) => aliasTokens.includes(t));
+      consider(0.9 + 0.1 * (aliasText.length / Math.max(query.length, aliasText.length)), 'contains', covered);
+      continue;
+    }
+    // كلمات الأمر كلها جزء من اسم أطول (مثال: "maps" داخل "Google Maps")
+    if (query.length >= 3 && queryTokens.every((t) => aliasTokens.includes(t))) {
+      consider(0.75 + 0.1 * (query.length / aliasText.length), 'subset', true);
+    }
+    // تقريب للأخطاء الإملائية، كلمة بكلمة
+    let fuzzy = 0;
+    if (aliasTokens.length === 1) {
+      for (const t of queryTokens) fuzzy = Math.max(fuzzy, similarity(t, aliasTokens[0]));
+    } else {
+      fuzzy = similarity(query, aliasText);
+    }
+    // نرفض التشابه الضعيف، ونقلل قيمة التقريب عن التطابق الحقيقي
+    if (fuzzy >= 0.72) consider(fuzzy * 0.88, 'fuzzy', false);
   }
   return best;
 }
@@ -111,7 +118,9 @@ function matchCustom(queryTokens, custom) {
 }
 
 // apps: [{ name, pkg, aliases }]  |  custom: [{ phrase, pkg, name }]
-// يرجع { app, score, ambiguous, others, custom } أو null لو لم يفهم
+// يرجع { app, score, ambiguous, confident, others, custom } أو null لو لم يفهم
+//   confident = true  → ننفّذ فورًا.
+//   confident = false → نعرض الفهم ونطلب تأكيدًا (غامض، أو تقريب إملائي، أو فيه كلمة زائدة لم تُفهم).
 function understand(command, apps = KNOWN, custom = []) {
   const q = tokens(command);
   if (!q.length) return null;
@@ -119,18 +128,36 @@ function understand(command, apps = KNOWN, custom = []) {
   const hit = matchCustom(q, custom);
   if (hit) {
     const app = apps.find((a) => a.pkg === hit.pkg) || { name: hit.name || hit.pkg, pkg: hit.pkg, aliases: [] };
-    return { app, score: 2, ambiguous: false, others: [], custom: true };
+    return { app, score: 2, ambiguous: false, confident: true, others: [], custom: true };
   }
 
   const scored = apps
-    .map((app) => ({ app, score: scoreApp(app, q) }))
+    .map((app) => ({ app, ...scoreApp(app, q) }))
     .filter((x) => x.score >= 0.6)
     .sort((a, b) => b.score - a.score);
   if (!scored.length) return null;
   const [top, ...rest] = scored;
   // لو أول نتيجتين قريبتين جدًا نعتبر الأمر غامضًا
   const ambiguous = rest.length > 0 && top.score - rest[0].score < 0.05 && top.score < 0.95;
-  return { app: top.app, score: top.score, ambiguous, others: rest.slice(0, 3).map((x) => x.app), custom: false };
+  // الجزئي (subset) والتقريب الإملائي (fuzzy) دائمًا يحتاجان تأكيدًا: كلمة مثل "جوجل" قد تخص أكثر من تطبيق.
+  const confident = !ambiguous && top.covered && (top.kind === 'exact' || top.kind === 'contains');
+  return { app: top.app, score: top.score, ambiguous, confident, others: rest.slice(0, 3).map((x) => x.app), custom: false };
 }
 
-module.exports = { understand, normalize, tokens };
+// للصوت: المتعرّف يرجّع عدة صيغ محتملة للجملة. نعتمد الصيغة الأولى،
+// ولا نرفع الثقة إلا لو صيغة أخرى أكدت نفس التطبيق بثقة (اتفاق)، منعًا لفتح تطبيق خاطئ من صيغة عشوائية.
+function understandBest(commands, apps = KNOWN, custom = []) {
+  const results = commands.map((c) => understand(c, apps, custom));
+  const first = results.findIndex(Boolean);
+  if (first < 0) return null;
+  const top = results[first];
+  if (first > 0) return { ...top, confident: false }; // الصيغة الأولى لم تُفهم: لا ننفّذ من صيغة بديلة دون تأكيد
+  if (top.confident) return top;
+  if (!top.ambiguous) {
+    const agree = results.some((r) => r && r.confident && r.app.pkg === top.app.pkg);
+    if (agree) return { ...top, confident: true };
+  }
+  return top;
+}
+
+module.exports = { understand, understandBest, normalize, tokens };

@@ -84,4 +84,80 @@ for (const [cmd, expected, cust] of cases2) {
   console.log(`${ok ? 'OK  ' : 'FAIL'} | "${cmd}" -> ${got}${ok ? '' : `  | المتوقع: ${expected}`}`);
 }
 console.log(`\n${cases2.length - failed2}/${cases2.length} نجحت (المثبتة والمخصصة)`);
-process.exit(failed || failed2 ? 1 : 0);
+
+// ===== اختبارات الثقة: متى ننفّذ فورًا ومتى نطلب تأكيدًا، ومنع الفتح الخاطئ =====
+const similarApps = buildApps([
+  { name: 'WhatsApp', pkg: 'com.whatsapp' },
+  { name: 'WhatsApp Business', pkg: 'com.whatsapp.w4b' },
+  { name: 'YouTube', pkg: 'com.google.android.youtube' },
+  { name: 'YouTube Music', pkg: 'com.google.android.apps.youtube.music' },
+  { name: 'Google', pkg: 'com.google.android.googlequicksearchbox' },
+  { name: 'Google Maps', pkg: 'com.google.android.apps.maps' },
+  { name: 'Google Photos', pkg: 'com.google.android.apps.photos' },
+]);
+const vodaApps = buildApps([{ name: 'Vodafone Ana', pkg: 'com.emeint.android.myservices' }]);
+const onlyGoogleFamily = buildApps([
+  { name: 'Google Maps', pkg: 'com.google.android.apps.maps' },
+  { name: 'Google Photos', pkg: 'com.google.android.apps.photos' },
+]);
+
+// [الأمر, التطبيق المتوقع, هل ننفّذ فورًا؟, قائمة التطبيقات]
+const cases3 = [
+  ['افتح يوتيوب', 'YouTube', true, similarApps],
+  ['افتح يوتيوب ميوزيك', 'YouTube Music', true, similarApps],   // كان يفتح YouTube خطأً
+  ['افتح اليوتيوب ميوزيك', 'YouTube Music', true, similarApps],
+  ['افتح واتساب', 'WhatsApp', true, similarApps],
+  ['افتح واتساب بيزنس', 'WhatsApp Business', true, similarApps], // كان يفتح WhatsApp خطأً
+  ['افتح جوجل', 'Google', true, similarApps],                   // تطابق تام يغلب الأسماء الأطول
+  ['افتح maps', 'Google Maps', true, similarApps],              // اسم دارج مسجّل في apps.js → فوري
+  ['افتح vodafone', 'Vodafone Ana', false, vodaApps],           // جزء من اسم أطول غير مسجّل → تأكيد
+  ['افتح خرائط', 'Google Maps', true, similarApps],
+  ['افتح مقاطع واتساب', 'WhatsApp', false, similarApps],        // كلمة زائدة لم تُفهم → تأكيد
+  ['افتح واتسااب', 'WhatsApp', false, similarApps],             // تقريب إملائي → تأكيد
+  ['افتح يوتيوبب', 'YouTube', false, similarApps],
+  ['افتح جوجل', 'Google Maps', false, onlyGoogleFamily],        // غامض بين Maps وPhotos → تأكيد (أيهما يظهر أولًا)
+];
+let failed3 = 0;
+for (const [cmd, expected, wantConfident, list] of cases3) {
+  const r = understand(cmd, list, []);
+  const got = r ? r.app.name : null;
+  const isAmbiguousCase = list === onlyGoogleFamily;
+  // في الحالة الغامضة نتحقق فقط أنه غير واثق وأنه مرشَّح بين الخيارات
+  const nameOk = isAmbiguousCase ? !!r && [r.app, ...r.others].some((a) => a.name === expected) : got === expected;
+  const ok = nameOk && !!r && r.confident === wantConfident;
+  if (!ok) failed3++;
+  console.log(`${ok ? 'OK  ' : 'FAIL'} | "${cmd}" -> ${got}${r ? ` (${r.score.toFixed(2)}, ${r.confident ? 'فوري' : 'تأكيد'})` : ''}${ok ? '' : `  | المتوقع: ${expected} / ${wantConfident ? 'فوري' : 'تأكيد'}`}`);
+}
+console.log(`\n${cases3.length - failed3}/${cases3.length} نجحت (الثقة والتأكيد)`);
+
+// الأمر المخصص دائمًا فوري
+{
+  const r = understand('مزرعتي', similarApps, [{ phrase: 'مزرعتي', pkg: 'com.example.farm', name: 'Farm' }]);
+  const ok = !!r && r.custom && r.confident;
+  if (!ok) failed3++;
+  console.log(`${ok ? 'OK  ' : 'FAIL'} | الأمر المخصص فوري`);
+}
+
+// ===== اختبارات الصيغ المتعددة القادمة من التعرف الصوتي =====
+{
+  const { understandBest } = require('./matcher');
+  const alt = [
+    // [الصيغ بالترتيب, التطبيق المتوقع, فوري؟]
+    [['افتح واتساب', 'افتح وتساب'], 'WhatsApp', true],
+    [['افتح واتسااب', 'افتح واتساب'], 'WhatsApp', true],            // الأولى تقريبية، والثانية تؤكد نفس التطبيق
+    [['افتح مقاطع واتساب', 'افتح واتساب'], 'WhatsApp', true],       // الثانية تؤكد نفس التطبيق
+    [['ازيك عامل ايه', 'افتح يوتيوب'], 'YouTube', false],           // الأولى لا تُفهم: نطلب تأكيدًا ولا ننفّذ
+    [['افتح مقاطع واتساب'], 'WhatsApp', false],
+  ];
+  let failed4 = 0;
+  for (const [cmds, expected, wantConfident] of alt) {
+    const r = understandBest(cmds, similarApps, []);
+    const ok = !!r && r.app.name === expected && r.confident === wantConfident;
+    if (!ok) failed4++;
+    console.log(`${ok ? 'OK  ' : 'FAIL'} | [${cmds.join(' | ')}] -> ${r ? r.app.name + (r.confident ? ' (فوري)' : ' (تأكيد)') : null}`);
+  }
+  console.log(`\n${alt.length - failed4}/${alt.length} نجحت (الصيغ المتعددة)`);
+  failed3 += failed4;
+}
+
+process.exit(failed || failed2 || failed3 ? 1 : 0);
