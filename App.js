@@ -24,14 +24,27 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
   canDrawOverlays,
+  deleteVoiceprint,
+  diagnoseVoice,
+  enrollVoice,
   getLaunchableApps,
+  getUsage,
+  getVoiceThreshold,
+  getVoiceprints,
   isBubbleRunning,
   isSpeechAvailable,
   launchApp,
   onSpeechError,
   onSpeechResult,
   onSpeechState,
+  onVoiceNoMatch,
+  openAirplaneSettings,
+  openBluetoothSettings,
   openOverlaySettings,
+  openWifiPanel,
+  saveCommands,
+  setFlashlight,
+  setVoiceThreshold,
   showToast,
   startBubble,
   startListening,
@@ -40,12 +53,14 @@ import {
 } from './modules/installed-apps';
 import KNOWN from './apps';
 import { buildApps } from './appList';
+import { matchDeviceCommand } from './deviceCommands';
 import { normalize, tokens, understand, understandBest } from './matcher';
 import {
   addAlias,
   countAliases,
   exportJson,
   mergeImport,
+  mergeUsage,
   parseImport,
   recordUse,
   removeAlias,
@@ -94,7 +109,13 @@ export default function App() {
   const [teachPhrase, setTeachPhrase] = useState(null); // يظهر زر "علّمني" بعد أمر غير مفهوم
   const [listening, setListening] = useState(false);
   const [bubbleOn, setBubbleOn] = useState(false);
+  const [voicePrints, setVoicePrints] = useState([]); // البصمات الصوتية المسجلة [{id,pkg,phrase}]
+  const [voiceTh, setVoiceTh] = useState(0.72); // عتبة قبول البصمة (مرحلة 6) — تُقرأ من الكوتلن عند البدء
+  const [diag, setDiag] = useState(null); // نتيجة آخر اختبار تشخيص { bestPhrase, bestD, threshold, matched }
   const handlerRef = useRef({});
+  // عدّاد جولات جوجل الفاشلة المتتالية (المرحلة 3): إعادة تلقائية واحدة عند
+  // «ما فهمتش/ما سمعتش» فقط — بعد فشل جولتين نوجّه المستخدم للتعليم بدل الحلقة اللانهائية.
+  const retryRef = useRef(0);
   const [choice, setChoice] = useState(null); // { phrase, candidates } فهم غير مؤكد: ننتظر اختيار المستخدم ونتعلّم منه
   const [usage, setUsage] = useState({ counts: {}, recent: [] });
   const [showImport, setShowImport] = useState(false);
@@ -127,7 +148,9 @@ export default function App() {
       try {
         const raw = await AsyncStorage.getItem(STORE_KEY);
         if (raw) {
-          setCustom(sanitizeCommands(JSON.parse(raw)));
+          const parsed = sanitizeCommands(JSON.parse(raw));
+          setCustom(parsed);
+          pushCommands(parsed);
         } else {
           // ترحيل تلقائي من الشكل القديم دون فقد أي أمر (والمفتاح القديم يبقى كما هو)
           const old = await AsyncStorage.getItem(OLD_STORE_KEY);
@@ -135,20 +158,156 @@ export default function App() {
             const migrated = sanitizeCommands(JSON.parse(old));
             setCustom(migrated);
             await AsyncStorage.setItem(STORE_KEY, JSON.stringify(migrated));
+            pushCommands(migrated);
           }
         }
       } catch (e) {}
       try {
         const u = await AsyncStorage.getItem(USAGE_KEY);
-        if (u) setUsage(sanitizeUsage(JSON.parse(u)));
+        let local = u ? sanitizeUsage(JSON.parse(u)) : { counts: {}, recent: [] };
+        // ندمج مرآة الكوتلن (عدّادات فتح الدائرة وضغطة الضغط الطويل) مع استخدام التطبيق:
+        // كل فتحة تُحسب في جهة واحدة، فالأكبر لكل عدّاد هو الصحيح.
+        try {
+          const nu = await getUsage();
+          if (nu) {
+            const merged = mergeUsage(local, JSON.parse(nu));
+            local = merged;
+            await AsyncStorage.setItem(USAGE_KEY, JSON.stringify(merged));
+          }
+        } catch (e) {}
+        setUsage(local);
       } catch (e) {}
+      refreshVoice();
     })();
   }, [loadApps]);
+
+  // نرسل الأوامر لمرآة الكوتلن (Prefs) — بدونها الدائرة العائمة لا ترى الأوامر المخصصة
+  function pushCommands(list) {
+    try {
+      saveCommands(JSON.stringify(list));
+    } catch (e) {}
+  }
+
+  // ===== البصمة الصوتية (المرحلة 2) =====
+  function refreshVoice() {
+    getVoiceprints()
+      .then((raw) => {
+        try {
+          setVoicePrints(JSON.parse(raw || '[]'));
+        } catch (e) {}
+      })
+      .catch(() => {});
+    // نقرأ العتبة الحالية من الكوتلن (مصدر الحقيقة) كل تحديث
+    try {
+      setVoiceTh(getVoiceThreshold());
+    } catch (e) {}
+  }
+
+  // ===== الصقل (المرحلة 6): عتبة البصمة + تشخيص =====
+  function bumpTh(delta) {
+    const v = Math.min(1.2, Math.max(0.4, Math.round((voiceTh + delta) * 100) / 100));
+    setVoiceTh(v);
+    try {
+      setVoiceThreshold(v);
+    } catch (e) {}
+  }
+
+  async function doDiagnose() {
+    if (!voicePrints.length) {
+      setMessage({ kind: 'warn', body: 'سجّل بصمة الأول: دوس مطولًا على أي تطبيق في القايمة.' });
+      return;
+    }
+    if (!(await ensureMic())) return;
+    setMessage({ kind: 'info', body: 'اتكلم دلوقتي — قل اسم التطبيق اللي سجلته مثل ما بتقوله للدائرة...' });
+    try {
+      const raw = await diagnoseVoice();
+      const d = JSON.parse(raw || '{}');
+      if (!d.ok) {
+        const msg =
+          d.error === 'busy'
+            ? 'فيه عملية سمع شغالة، استنى لحظة وجرّب تاني.'
+            : d.error === 'noisy'
+              ? 'ما سمعتش صوت واضح — قرّب من الميكروفون وجرّب تاني.'
+              : d.error === 'too_short'
+                ? 'الكلام طلع قصير أوي — مطّل الكلام شوية.'
+                : 'التشخيص ما نجحش، جرّب تاني.';
+        setMessage({ kind: 'warn', body: msg });
+        return;
+      }
+      setDiag(d);
+      setMessage({
+        kind: d.matched ? 'ok' : 'warn',
+        body: d.matched
+          ? `القبول هيحصل: «${d.bestPhrase}» بمسافة ${d.bestD.toFixed(2)} والعتبة ${d.threshold.toFixed(2)}.`
+          : `القبول هيرفض: أقرب بصمة «${d.bestPhrase}» بمسافة ${d.bestD.toFixed(2)} أعلى من العتبة ${d.threshold.toFixed(2)}. لو نطقك صح ارفع العتبة بالـ +.`,
+      });
+    } catch (e) {
+      setMessage({ kind: 'warn', body: 'التشخيص ما نجحش. جرّب تاني.' });
+    }
+  }
+
+  async function doEnroll(app) {
+    if (!(await ensureMic())) return;
+    setMessage({ kind: 'info', body: `هسجل صوتك: قل «${app.name}» 3 مرات بهدوء وبنفس النطق...` });
+    try {
+      const st = await enrollVoice(app.pkg, app.name);
+      if (st === 'ok') {
+        refreshVoice();
+        setMessage({ kind: 'ok', body: `تم تسجيل بصمة ${app.name}. دلوقتي قول اسمها من الدائرة وهي تفتح بلا إنترنت!` });
+      } else if (st === 'busy') {
+        setMessage({ kind: 'warn', body: 'فيه عملية سمع شغالة دلوقتي. استنى لحظة وجرب تاني.' });
+      } else if (st === 'too_short') {
+        setMessage({ kind: 'warn', body: 'الكلام طلع قصير أوي. جرب تاني وانت مطول شوية.' });
+      } else if (st === 'inconsistent') {
+        setMessage({ kind: 'warn', body: 'العينات الثلاثة مختلفة عن بعض. جرب تاني وبنفس النطق بالظبط.' });
+      } else {
+        setMessage({ kind: 'warn', body: 'ما قدرتش أسجل الصوت. اتأكد من الهدوء حواليك وجرب تاني.' });
+      }
+    } catch (e) {
+      setMessage({ kind: 'warn', body: 'ما قدرتش أسجل الصوت.' });
+    }
+  }
+
+  function doDeleteVoice(app) {
+    Alert.alert('حذف البصمة', `تمسح بصمة ${app.name}؟ هترجع تستخدم الإنترنت/جوجل معاها.`, [
+      { text: 'لا', style: 'cancel' },
+      {
+        text: 'احذف',
+        style: 'destructive',
+        onPress: () => {
+          deleteVoiceprint(app.pkg)
+            .then(refreshVoice)
+            .catch(() => {});
+          setMessage({ kind: 'info', body: `تم حذف بصمة ${app.name}.` });
+        },
+      },
+    ]);
+  }
+
+  // قائمة البصمة: ضغط مطول على أي تطبيق في «تطبيقاتي»
+  function voiceMenu(app) {
+    const has = voicePrints.some((v) => v.pkg === app.pkg);
+    const buttons = [{ text: 'إلغاء', style: 'cancel' }];
+    if (has) {
+      buttons.push({ text: 'إعادة التسجيل', onPress: () => doEnroll(app) });
+      buttons.push({ text: 'حذف البصمة', style: 'destructive', onPress: () => doDeleteVoice(app) });
+    } else {
+      buttons.push({ text: 'سجّل بصمة', onPress: () => doEnroll(app) });
+    }
+    Alert.alert(
+      'البصمة الصوتية (أوفلاين)',
+      has
+        ? `عندك بصمة لـ ${app.name}. قول اسمها من الدائرة في أي وقت وهي تفتح بلا إنترنت.`
+        : `هسجل صوتك وانت بتقول «${app.name}» 3 مرات. بعد كده قول اسمها من الدائرة بلا إنترنت خالص.`,
+      buttons
+    );
+  }
 
   async function saveCustom(next) {
     setCustom(next);
     try {
       await AsyncStorage.setItem(STORE_KEY, JSON.stringify(next));
+      pushCommands(next);
     } catch (e) {
       setMessage({ kind: 'warn', body: 'ما قدرتش أحفظ الأمر على الجوال.' });
     }
@@ -201,10 +360,67 @@ export default function App() {
     ]);
   }
 
+  // ===== أوامر الجهاز (المرحلة 4/5): كشاف + آخر واحد + إعدادات =====
+  // تُفحص قبل أسماء التطبيقات (قاموس مغلق في deviceCommands.js).
+  function settingsLabel(target) {
+    return target === 'wifi' ? 'الواي فاي والنت' : target === 'bluetooth' ? 'البلوتوث' : 'وضع الطيران';
+  }
+
+  function openSettingsFor(target) {
+    try {
+      return target === 'wifi' ? openWifiPanel() : target === 'bluetooth' ? openBluetoothSettings() : openAirplaneSettings();
+    } catch (e) {
+      return 'failed';
+    }
+  }
+
+  function executeDevice(d) {
+    if (d.type === 'torch') {
+      let st = 'failed';
+      try {
+        st = setFlashlight(d.on);
+      } catch (e) {}
+      if (st === 'ok') setMessage({ kind: 'ok', body: d.on ? 'ولّعت الكشاف 💡' : 'قفلت الكشاف' });
+      else if (st === 'no_flash') setMessage({ kind: 'warn', body: 'الجهاز ده معندوش كشاف.' });
+      else setMessage({ kind: 'warn', body: 'ما قدرتش أتحكم في الكشاف. جرّب تاني.' });
+      return true;
+    }
+    if (d.type === 'settings') {
+      const st = openSettingsFor(d.target);
+      if (st === 'ok') {
+        setMessage({
+          kind: 'info',
+          body: `أندرويد 11 مش بيسمح أغير ${settingsLabel(d.target)} بنفسي — فتحتلك الإعدادات، أكمل بإيدك.`,
+        });
+      } else {
+        setMessage({ kind: 'warn', body: 'ما قدرتش أفتح الإعدادات. جرّب تاني.' });
+      }
+      return true;
+    }
+    if (d.type === 'last') {
+      const pkg = usage.recent[0];
+      const app = pkg ? appByPkg.get(pkg) : null;
+      if (!app) {
+        setMessage({ kind: 'warn', body: 'ما فيه تطبيق فتحته قبل كده. افتح تطبيق الأول وهايتذكره.' });
+        return true;
+      }
+      openApp(app);
+      return true;
+    }
+    return false;
+  }
+
   function run(command, alts) {
     Keyboard.dismiss();
     setChoice(null);
     const list = alts && alts.length ? alts : [command];
+    // أوامر الجهاز تُفحص قبل أسماء التطبيقات (كشاف / آخر تطبيق)
+    const dev = list.map((t) => matchDeviceCommand(t)).find(Boolean);
+    if (dev) {
+      setText('');
+      executeDevice(dev);
+      return;
+    }
     const result = understandBest(list, apps, custom);
     if (result && result.confident) {
       openApp(result.app);
@@ -253,6 +469,7 @@ export default function App() {
     if (listening) {
       stopListening();
       setListening(false);
+      retryRef.current = 0; // إيقاف بشري — نصفر السلسلة
       return;
     }
     if (!(await ensureMic())) return;
@@ -262,6 +479,7 @@ export default function App() {
     }
     setTeachPhrase(null);
     setChoice(null);
+    retryRef.current = 0; // بدء يدوي جديد — سلسلة نظيفة
     setListening(true);
     setMessage({ kind: 'info', body: 'بسمعك... قل اسم التطبيق' });
     startListening();
@@ -301,6 +519,53 @@ export default function App() {
 
   // أمر جاء من الدائرة العائمة (التطبيق غالبًا في الخلفية)
   function runFromBubble(alts) {
+    // أوامر الجهاز تُنفذ فورًا دون فتح «افتح لي» — عش أسماء التطبيقات
+    // ⚠️ كل الأنواع (torch/last/settings) تُنفذ هنا داخل if (dev) —
+    //    الفحص خارجه كان كودًا ميتًا جعل «افتح الواي فاي» تفتح آخر تطبيق.
+    const dev = alts.map((t) => matchDeviceCommand(t)).find(Boolean);
+    if (dev) {
+      if (dev.type === 'torch') {
+        let st = 'failed';
+        try {
+          st = setFlashlight(dev.on);
+        } catch (e) {}
+        showToast(
+          st === 'ok'
+            ? (dev.on ? 'ولّعت الكشاف 💡' : 'قفلت الكشاف')
+            : st === 'no_flash'
+              ? 'الجهاز معندوش كشاف'
+              : 'ما قدرتش أتحكم في الكشاف'
+        );
+        return;
+      }
+      if (dev.type === 'settings') {
+        const st = openSettingsFor(dev.target);
+        showToast(
+          st === 'ok'
+            ? `أندرويد 11 مش بيسمح أغيره بنفسي — فتحتلك إعدادات ${settingsLabel(dev.target)}`
+            : 'ما قدرتش أفتح الإعدادات'
+        );
+        return;
+      }
+      // dev.type === 'last'
+      const pkg = usage.recent[0];
+      const app = pkg ? appByPkg.get(pkg) : null;
+      if (!app) {
+        showToast('ما فيه تطبيق فتحته قبل كده');
+        return;
+      }
+      let status = 'failed';
+      try {
+        status = launchApp(app.pkg);
+      } catch (e) {}
+      if (status === 'ok') {
+        showToast(`تم فتح ${app.name}`);
+        noteUse(app);
+      }
+      else if (status === 'not_installed') showToast(`${app.name} غير مثبت`);
+      else showToast(`ما قدرتش أفتح ${app.name}`);
+      return;
+    }
     const r = understandBest(alts, apps, custom);
     if (r && r.confident) {
       let status = 'failed';
@@ -323,6 +588,29 @@ export default function App() {
     run(alts[0], alts);
   }
 
+  function onVoiceNoMatchHandler(e) {
+    // البصمة لم تثق → جولة جوجل الاحتياطية (بلا تسجيل ذاتي متزامن).
+    // ⏱️ مهلة 450ms قبل البدء: AudioRecord في matchOnce يحتاج لحظة ليفلت
+    //    الميكروفون فعليًا (قاعدة: لا ميكروفونين أبدًا) — بدونها قد تعطي
+    //    SpeechRecognizer خطأ صوت/انشغال على جهاز بطيء مثل T610.
+    retryRef.current = 0; // جولة الاحتياط = أول محاولة لجوجل، سلسلة نظيفة
+    const startFallback = () => {
+      if (e.source === 'bubble') {
+        try {
+          launchApp(OWN_PKG);
+        } catch (err) {}
+      }
+      setListening(true);
+      const nums =
+        typeof e.distance === 'number' && typeof e.threshold === 'number'
+          ? ` (مسافة ${e.distance.toFixed(2)} من عتبة ${e.threshold.toFixed(2)})`
+          : '';
+      setMessage({ kind: 'info', body: `البصمة ماعرفتهاش بقوة كفاية${nums} — بقول لجوجل.. قول الأمر تاني` });
+      startListening();
+    };
+    setTimeout(startFallback, 450);
+  }
+
   function onState(e) {
     if (e.source === 'app') setListening(e.state !== 'idle');
   }
@@ -330,6 +618,7 @@ export default function App() {
   function onResult(e) {
     const alts = (e.alternatives ? e.alternatives.split('|') : [e.text]).filter(Boolean);
     if (!alts.length) return;
+    retryRef.current = 0; // نجاح — نغلق سلسلة الإعادات
     if (e.source === 'bubble') {
       runFromBubble(alts);
     } else {
@@ -339,20 +628,39 @@ export default function App() {
   }
 
   function onError(e) {
-    if (e.source === 'app') {
-      setListening(false);
-      setMessage({ kind: 'warn', body: e.message });
+    if (e.source !== 'app') return; // أخطاء الدائرة تظهر كـ Toast من الخدمة نفسها
+    setListening(false);
+    // جولتا جوجل فقط (NO_MATCH=7 ما فهمتش | SPEECH_TIMEOUT=6 ما سمعتش)
+    // تستحقان إعادة تلقائية — أخطاء الشبكة والأذونات لا، فالرسالة تكفي.
+    const retryable = e.code === 7 || e.code === 6;
+    if (retryable && retryRef.current < 1) {
+      retryRef.current += 1;
+      setListening(true);
+      setMessage({ kind: 'info', body: 'ما وصلتش — قول الأمر تاني...' });
+      startListening();
+      return;
     }
+    if (retryable) {
+      // جولتان فاشلتان متتاليتان → الحلقة الصوتية مستنفدة، نوجّه للبدائل المضمونة
+      retryRef.current = 0;
+      setMessage({
+        kind: 'warn',
+        body: 'مقدرتش أفهم الأمر بصوتك. اكتبه في الخانة فوق، أو دوس مطول على التطبيق وعلّمني بصمة صوتية تقفل بيها جوجل خالص.',
+      });
+      return;
+    }
+    setMessage({ kind: 'warn', body: e.message });
   }
 
   // نحدّث المعالجات في كل رسم حتى ترى أحدث التطبيقات والأوامر
-  handlerRef.current = { onState, onResult, onError };
+  handlerRef.current = { onState, onResult, onError, onVoiceNoMatch: onVoiceNoMatchHandler };
 
   useEffect(() => {
     const subs = [
       onSpeechState((e) => handlerRef.current.onState(e)),
       onSpeechResult((e) => handlerRef.current.onResult(e)),
       onSpeechError((e) => handlerRef.current.onError(e)),
+      onVoiceNoMatch((e) => handlerRef.current.onVoiceNoMatch(e)),
     ];
     const sync = () => {
       try {
@@ -493,9 +801,48 @@ export default function App() {
           <Switch value={bubbleOn} onValueChange={toggleBubble} trackColor={{ false: c.border, true: c.accent }} thumbColor="#FFFFFF" />
           <View style={s.bubbleInfo}>
             <Text style={s.bubbleTitle}>الدائرة العائمة</Text>
-            <Text style={s.bubbleSub}>{bubbleOn ? 'شغالة. اسحبها إلى ✕ أسفل الشاشة لإغلاقها' : 'تظهر فوق أي تطبيق لتتكلم من أي مكان'}</Text>
+            <Text style={s.bubbleSub}>
+              {bubbleOn
+                ? voicePrints.length
+                  ? `شغالة. عندك ${voicePrints.length} بصمة أوفلاين — قول اسمها والدائرة تفهمك بلا نت`
+                  : 'شغالة. اسحبها إلى ✕ أسفل الشاشة لإغلاقها'
+                : 'تظهر فوق أي تطبيق لتتكلم من أي مكان'}
+            </Text>
           </View>
         </View>
+
+        <Text style={[s.usageTitle, { textAlign: 'center', marginBottom: 6 }]}>
+          🎙️ {voicePrints.length ? `${voicePrints.length} بصمة صوتية مسجلة (الإطار البرتقالي)` : 'اضغط مطولًا على أي تطبيق لتسجيل بصمته الصوتية — تشتغل بلا إنترنت'}
+        </Text>
+
+        {voicePrints.length ? (
+          <View style={s.tuneCard}>
+            <View style={s.tuneHead}>
+              <Text style={s.tuneTitle}>ضبط البصمة</Text>
+              <View style={s.tuneThRow}>
+                <Pressable style={s.tuneBtn} onPress={() => bumpTh(-0.04)} accessibilityRole="button" accessibilityLabel="تقليل العتبة">
+                  <Text style={s.tuneBtnText}>−</Text>
+                </Pressable>
+                <Text style={s.tuneVal}>العتبة {voiceTh.toFixed(2)}</Text>
+                <Pressable style={s.tuneBtn} onPress={() => bumpTh(0.04)} accessibilityRole="button" accessibilityLabel="زيادة العتبة">
+                  <Text style={s.tuneBtnText}>+</Text>
+                </Pressable>
+              </View>
+            </View>
+            <Text style={s.tuneHint}>
+              جرّب تقول اسم التطبيق 5 مرات وشوف الأرقام: لو المسافة أعلى من العتبة رغم إن نطقك صح، ارفعها بالـ +. لو فتحت تطبيق غلط، قللها بالـ −.
+            </Text>
+            <Pressable style={s.tuneTest} onPress={doDiagnose} accessibilityRole="button">
+              <Text style={s.tuneTestText}>🧪 اختبر بصمتك (تسجيلة بلا فتح أي حاجة)</Text>
+            </Pressable>
+            {diag ? (
+              <Text style={s.tuneDiag}>
+                آخر اختبار: «{diag.bestPhrase}» — مسافة {diag.bestD.toFixed(2)} / عتبة {diag.threshold.toFixed(2)}{' '}
+                {diag.matched ? '✅ هتُقبل' : '⛔ هتُرفض'}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         <View style={[s.message, { borderColor: msgColor, borderRightColor: msgColor }]}>
           <Text style={[s.messageText, message.kind === 'warn' && { color: c.warn }]}>{message.body}</Text>
@@ -572,8 +919,14 @@ export default function App() {
                 </Pressable>
               }
               renderItem={({ item }) => (
-                <Pressable style={s.tile} onPress={() => openApp(item)} accessibilityRole="button" accessibilityLabel={`افتح ${item.name}`}>
-                  <View style={[s.avatar, { backgroundColor: avatarColor(item.name) }]}>
+                <Pressable
+                  style={s.tile}
+                  onPress={() => openApp(item)}
+                  onLongPress={() => voiceMenu(item)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`افتح ${item.name}، أو ضغط مطول لتسجيل البصمة الصوتية`}
+                >
+                  <View style={[s.avatar, { backgroundColor: avatarColor(item.name) }, voicePrints.some((v) => v.pkg === item.pkg) && { borderWidth: 2, borderColor: '#F59E0B' }]}>
                     <Text style={s.avatarText}>{initial(item.name)}</Text>
                   </View>
                   <Text style={s.tileText} numberOfLines={2}>
@@ -759,6 +1112,17 @@ function makeStyles(c) {
     heroMicText: { fontSize: 34, color: '#FFFFFF' },
     heroLabel: { marginTop: 8, color: c.sub, fontSize: 14, writingDirection: 'rtl', textAlign: 'center' },
     bubbleCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 16, marginTop: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: c.card, borderRadius: 14, borderWidth: 1, borderColor: c.border },
+    tuneCard: { marginHorizontal: 16, marginTop: 10, padding: 12, backgroundColor: c.card, borderRadius: 14, borderWidth: 1, borderColor: c.border },
+    tuneHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    tuneTitle: { color: c.text, fontSize: 14, fontWeight: '700', writingDirection: 'rtl' },
+    tuneThRow: { flexDirection: 'row', alignItems: 'center' },
+    tuneBtn: { width: 36, height: 30, borderRadius: 8, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginHorizontal: 4 },
+    tuneBtnText: { color: c.onAccent, fontSize: 18, fontWeight: '700' },
+    tuneVal: { color: c.text, fontSize: 13.5, fontWeight: '700', minWidth: 92, textAlign: 'center' },
+    tuneHint: { color: c.sub, fontSize: 12, marginTop: 8, textAlign: 'right', writingDirection: 'rtl', lineHeight: 18 },
+    tuneTest: { marginTop: 10, backgroundColor: c.accent, borderRadius: 10, paddingVertical: 9, alignItems: 'center' },
+    tuneTestText: { color: c.onAccent, fontWeight: '700', fontSize: 13.5 },
+    tuneDiag: { color: c.sub, fontSize: 12, marginTop: 8, textAlign: 'right', writingDirection: 'rtl' },
     bubbleInfo: { flex: 1, alignItems: 'flex-end', marginLeft: 10 },
     bubbleTitle: { color: c.text, fontSize: 15, fontWeight: '700', writingDirection: 'rtl' },
     bubbleSub: { color: c.sub, fontSize: 12.5, marginTop: 2, textAlign: 'right', writingDirection: 'rtl' },

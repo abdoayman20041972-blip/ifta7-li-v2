@@ -140,8 +140,21 @@ function sortByUsage(list, usage, pkgOf = (x) => x.pkg) {
   return list.map((x, i) => ({ x, i })).sort((a, b) => (u.counts[pkgOf(b.x)] || 0) - (u.counts[pkgOf(a.x)] || 0) || a.i - b.i).map((o) => o.x);
 }
 
+// ===== دمج استخدام الجهاز (مرآة الكوتلن) مع استخدام التطبيق =====
+// كل فتحة ناجحة تُحسب مرة واحدة في جهة (التطبيق أو الكوتلن)، فالأكبر لكل عدّاد هو الصحيح.
+// قائمة «آخر ما فتحته» ندمجهما بترتيب: مرآة الكوتلن أولًا (أحدث عند الإقلاع) ثم المحلي.
+function mergeUsage(local, native) {
+  const a = sanitizeUsage(local);
+  const b = sanitizeUsage(native);
+  const counts = { ...a.counts };
+  for (const [pkg, n] of Object.entries(b.counts)) counts[pkg] = Math.max(counts[pkg] || 0, n);
+  const recent = [];
+  for (const p of [...b.recent, ...a.recent]) if (!recent.includes(p)) recent.push(p);
+  return { counts, recent: recent.slice(0, RECENT_MAX) };
+}
+
 module.exports = {
   sanitizeCommands, addAlias, removeAlias, removeApp, countAliases,
   exportJson, parseImport, mergeImport,
-  sanitizeUsage, recordUse, topUsed, sortByUsage,
+  sanitizeUsage, recordUse, topUsed, sortByUsage, mergeUsage,
 };
