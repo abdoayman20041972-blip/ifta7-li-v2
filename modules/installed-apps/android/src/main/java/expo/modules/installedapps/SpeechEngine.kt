@@ -19,28 +19,40 @@ fun speechErrorMessage(code: Int): String = when (code) {
   else -> "تعذر التعرف على الكلام (رمز $code)"
 }
 
-// يغلّف SpeechRecognizer. كل الدوال يجب أن تُستدعى من الخيط الرئيسي.
-class SpeechEngine(
-  private val context: Context,
-  private val stateCb: (String) -> Unit,
-  private val resultCb: (List<String>) -> Unit,
-  private val errorCb: (Int) -> Unit
-) {
+// محرك التعرف على الكلام — singleton واحد يتشاركه التطبيق والدائرة العائمة.
+//
+// لماذا singleton؟ إنشاء أكثر من SpeechRecognizer في نفس اللحظة يسبب
+// ERROR_RECOGNIZER_BUSY، وكان يحدث فعلًا: محرك التطبيق (InstalledAppsModule)
+// ومحرك الدائرة (BubbleService) كانا ينشئان كلٌّ محركه المستقل.
+// القاعدة الآن: آخر من يطلب الاستماع يفوز، وإفراج السابق تلقائي.
+// كل الاستدعاءات يجب أن تتم من الخيط الرئيسي (شرط SpeechRecognizer).
+object SpeechEngine {
   private var recognizer: SpeechRecognizer? = null
+  private var stateCb: (String) -> Unit = {}
+  private var resultCb: (List<String>) -> Unit = {}
+  private var errorCb: (Int) -> Unit = {}
+
+  @Volatile
   var listening: Boolean = false
     private set
 
-  companion object {
-    fun isAvailable(context: Context): Boolean = SpeechRecognizer.isRecognitionAvailable(context)
-  }
+  fun isAvailable(context: Context): Boolean = SpeechRecognizer.isRecognitionAvailable(context)
 
-  fun start() {
+  fun start(
+    context: Context,
+    onState: (String) -> Unit,
+    onResult: (List<String>) -> Unit,
+    onError: (Int) -> Unit
+  ) {
     release()
     if (!isAvailable(context)) {
-      errorCb(-1)
+      onError(-1)
       return
     }
-    val r = SpeechRecognizer.createSpeechRecognizer(context)
+    stateCb = onState
+    resultCb = onResult
+    errorCb = onError
+    val r = SpeechRecognizer.createSpeechRecognizer(context.applicationContext)
     recognizer = r
     r.setRecognitionListener(object : RecognitionListener {
       override fun onReadyForSpeech(params: Bundle?) { listening = true; stateCb("listening") }
@@ -69,6 +81,17 @@ class SpeechEngine(
       putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
       putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
       putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+      // نطلب الأوفلاين أولوية إن كانت حزمة التعرف محملة على الجهاز.
+      // إضافة تجريبية (API 23+): إن لم تؤثر عند مزود الخدمة فلا ضرر منها.
+      putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+      // ===== مهلات الصمت (المرحلة 3) =====
+      // إكسترات قياسية منذ API 8 (آمنة — بعكس EXTRA_BIAS_STRINGS/CONFIDENCE المقيدة على API 33+).
+      // من غيرها يبقى الاستماع مفتوحًا مدة طويلة على realme UI بعد سكوت المستخدم،
+      // فتتأخر النتيجة ويبدو النظام بطيئًا. القيم: أقل استماع 1.5s،
+      // وإن سكت 1.2s بعد كلام محتمل أو 0.9s بعد كلام مؤكد نقطع وننشر النتيجة.
+      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
+      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
     }
     r.startListening(intent)
   }
