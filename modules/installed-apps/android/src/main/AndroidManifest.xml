@@ -4,6 +4,8 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- يعيد BootReceiver فتح الدائرة بعد إقلاع الجهاز (شرط realme: تفعيل Autostart من الإعدادات) -->
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
   <queries>
     <!-- يسمح برؤية التطبيقات التي لها أيقونة تشغيل، بدون إذن QUERY_ALL_PACKAGES الحساس -->
@@ -21,6 +23,19 @@
     <service
       android:name="expo.modules.installedapps.BubbleService"
       android:exported="false"
-      android:foregroundServiceType="microphone" />
+      android:foregroundServiceType="microphone"
+      android:stopWithTask="false" />
+
+    <!-- إعادة فتح الدائرة بعد إقلاع الجهاز لو كانت مفعّلة قبل الإيقاف -->
+    <receiver
+      android:name="expo.modules.installedapps.BootReceiver"
+      android:enabled="true"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <!-- بث إضافي تصدره أجهزة OPPO/realme عند بعض الإقلاعات -->
+        <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>
